@@ -21,6 +21,21 @@ import functools
 LOG_FILE = Path(__file__).parent / "app.log"
 LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
 
+def get_executable_path(name):
+    if getattr(sys, 'frozen', False):
+        application_path = os.path.dirname(sys.executable)
+    else:
+        application_path = os.path.dirname(__file__)
+
+    executable_path = os.path.join(application_path, name)
+    if os.path.exists(executable_path):
+        return executable_path
+    
+    return shutil.which(name)
+
+FFMPEG_PATH = get_executable_path("ffmpeg.exe")
+FFPROBE_PATH = get_executable_path("ffprobe.exe")
+
 # =============================================================================
 # DÉTECTION D'ENCODEUR ET OPTIMISATION
 # =============================================================================
@@ -28,10 +43,13 @@ LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
 def get_available_encoders():
     """Exécute ffmpeg -encoders et met en cache la sortie pour analyse."""
     logger.info("Détection des encodeurs FFmpeg disponibles...")
+    if not FFMPEG_PATH:
+        logger.error("La commande ffmpeg est introuvable.")
+        return ""
     try:
         # Utilise une commande qui se termine pour éviter de bloquer
         result = subprocess.run(
-            ["ffmpeg", "-encoders"],
+            [FFMPEG_PATH, "-encoders"],
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -170,7 +188,7 @@ def _generate_ffmpeg_command_and_output(mode: str, settings: dict, inputs: List[
     try:
         if mode == "convert":
             output_file = f"{base_name}_converted.{settings['output_format']}"
-            command = ["ffmpeg"]
+            command = [FFMPEG_PATH]
             if settings['trim_start']: command.extend(["-ss", settings['trim_start']])
             command.extend(["-i", input_file])
             if settings['trim_end']: command.extend(["-to", settings['trim_end']])
@@ -200,7 +218,7 @@ def _generate_ffmpeg_command_and_output(mode: str, settings: dict, inputs: List[
                 is_hevc = settings['output_format'] in ['mkv', 'mp4']
                 codec, codec_opts = select_best_video_codec(settings['crf'], for_hevc=is_hevc)
 
-            command = ["ffmpeg", "-framerate", settings['framerate'], "-start_number", str(seq_info['start']), "-i", seq_info['pattern'], "-c:v", codec]
+            command = [FFMPEG_PATH, "-framerate", settings['framerate'], "-start_number", str(seq_info['start']), "-i", seq_info['pattern'], "-c:v", codec]
             for opt, val in codec_opts.items():
                 command.extend([opt, val])
             command.extend(["-pix_fmt", pix_fmt, output_file, "-y"])
@@ -208,37 +226,37 @@ def _generate_ffmpeg_command_and_output(mode: str, settings: dict, inputs: List[
 
         elif mode == "vid_seq":
             output_file = str(Path(input_file).parent / settings['output_pattern'])
-            command = ["ffmpeg", "-i", input_file, output_file, "-y"]
+            command = [FFMPEG_PATH, "-i", input_file, output_file, "-y"]
         elif mode == "extract_image":
             output_ext = settings['format']
             if settings["extract_mode"] == "Timestamp":
                 if not settings['timestamp']: raise ValueError("Timestamp non spécifié.")
                 time_str = settings['timestamp'].replace(':', '-')
                 output_file = f"{base_name}_frame_at_{time_str}.{output_ext}"
-                command = ["ffmpeg", "-ss", settings['timestamp'], "-i", input_file, "-vframes", "1", output_file, "-y"]
+                command = [FFMPEG_PATH, "-ss", settings['timestamp'], "-i", input_file, "-vframes", "1", output_file, "-y"]
             else: # Frame Number
                 if not settings['frame_number']: raise ValueError("Numéro de frame non spécifié.")
                 frame_num = int(settings['frame_number']) - 1
                 if frame_num < 0: raise ValueError("Le numéro de frame doit être positif.")
                 output_file = f"{base_name}_frame_{frame_num + 1}.{output_ext}"
-                command = ["ffmpeg", "-i", input_file, "-vf", f"select=eq(n\,{frame_num})", "-vframes", "1", output_file, "-y"]
+                command = [FFMPEG_PATH, "-i", input_file, "-vf", f"select=eq(n\,{frame_num})", "-vframes", "1", output_file, "-y"]
         elif mode == "extract_audio":
             ext = settings['audio_format']
             codec = {"mp3": "libmp3lame", "wav": "pcm_s16le", "aac": "aac"}[ext]
             output_file = f"{base_name}_audio.{ext}"
-            command = ["ffmpeg", "-i", input_file, "-vn", "-acodec", codec, "-q:a", "2", output_file, "-y"]
+            command = [FFMPEG_PATH, "-i", input_file, "-vn", "-acodec", codec, "-q:a", "2", output_file, "-y"]
         elif mode == "merge":
             if not settings['secondary_file']: raise ValueError("Fichier secondaire non spécifié.")
             output_file = f"{base_name}_merged.mp4"
-            command = ["ffmpeg", "-i", input_file, "-i", settings['secondary_file'], "-c:v", "copy", "-c:a", "aac", "-shortest", output_file, "-y"]
+            command = [FFMPEG_PATH, "-i", input_file, "-i", settings['secondary_file'], "-c:v", "copy", "-c:a", "aac", "-shortest", output_file, "-y"]
         elif mode == "subtitles":
             if not settings['secondary_file']: raise ValueError("Fichier de sous-titres non spécifié.")
             output_file = f"{base_name}_subtitled.mkv"
-            command = ["ffmpeg", "-i", input_file, "-i", settings['secondary_file'], "-c", "copy", "-c:s", "srt", output_file, "-y"]
+            command = [FFMPEG_PATH, "-i", input_file, "-i", settings['secondary_file'], "-c", "copy", "-c:s", "srt", output_file, "-y"]
         elif mode == "speed":
             speed = float(str(settings['speed_factor']).replace(',', '.'))
             output_file = f"{base_name}_speed_{speed}x.mp4"
-            command = ["ffmpeg", "-i", input_file, "-filter_complex", f"[0:v]setpts={1/speed}*PTS[v];[0:a]atempo={speed}[a]", "-map", "[v]", "-map", "[a]", output_file, "-y"]
+            command = [FFMPEG_PATH, "-i", input_file, "-filter_complex", f"[0:v]setpts={1/speed}*PTS[v];[0:a]atempo={speed}[a]", "-map", "[v]", "-map", "[a]", output_file, "-y"]
         return command, output_file
     except Exception as e:
         logger.exception(f"Erreur lors de la préparation de la commande pour le mode {mode}: {e}")
@@ -409,7 +427,7 @@ class ImageSequenceFrame(BaseTaskFrame):
         ctk.CTkLabel(self, textvariable=self.crf_value).grid(row=2, column=2, padx=10)
 
     def get_settings(self):
-        return {"output_format": self.output_format.get(), "framerate": self.framerate.get(), "crf": self.crf_value.get()}}
+        return {"output_format": self.output_format.get(), "framerate": self.framerate.get(), "crf": self.crf_value.get()}
 
 class VidSeqFrame(BaseTaskFrame):
     def __init__(self, master, **kwargs):
@@ -823,7 +841,7 @@ class Controller:
             codec, codec_opts = select_best_video_codec(settings['crf'], for_hevc=is_hevc)
 
         command = [
-            "ffmpeg",
+            FFMPEG_PATH,
             "-f", "concat",
             "-safe", "0",
             "-i", str(list_file_path),
@@ -842,8 +860,10 @@ class Controller:
         return command, output_file
 
     def _get_video_duration(self, filepath: str) -> Optional[float]:
+        if not FFPROBE_PATH:
+            return None
         try:
-            cmd = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", filepath]
+            cmd = [FFPROBE_PATH, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", filepath]
             result = subprocess.run(cmd, capture_output=True, text=True, check=True, encoding="utf-8", errors="replace")
             duration = float(result.stdout.strip())
             return duration
@@ -990,7 +1010,7 @@ class App(TkinterDnD.Tk):
         else:
             logger.warning(f"Icon file not found at {icon_path}. Please provide an app_icon.ico file.")
 
-        if shutil.which("ffmpeg") is None:
+        if not FFMPEG_PATH:
             messagebox.showerror("Erreur", "ffmpeg n'est pas installé ou n'est pas dans le PATH.")
             logger.error("ffmpeg non trouvé ou non accessible dans le PATH.")
             self.destroy() # Close the application if ffmpeg is not found
