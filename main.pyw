@@ -18,15 +18,17 @@ from logging.handlers import RotatingFileHandler
 from typing import List, Optional, Callable, Tuple
 import functools
 
-LOG_FILE = Path(__file__).parent / "app.log"
+LOG_FILE = Path.home() / ".ffmpeg_gui" / "app.log"
 LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
 
-def get_executable_path(name):
+def get_application_path():
     if getattr(sys, 'frozen', False):
-        application_path = os.path.dirname(sys.executable)
+        return os.path.dirname(sys.executable)
     else:
-        application_path = os.path.dirname(__file__)
+        return os.path.dirname(__file__)
 
+def get_executable_path(name):
+    application_path = get_application_path()
     executable_path = os.path.join(application_path, name)
     if os.path.exists(executable_path):
         return executable_path
@@ -994,9 +996,20 @@ class Controller:
 # =============================================================================
 # APPLICATION ROOT
 # =============================================================================
+def get_application_path():
+    if getattr(sys, 'frozen', False):
+        return os.path.dirname(sys.executable)
+    else:
+        return os.path.dirname(__file__)
+
 class App(TkinterDnD.Tk):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
+
+        if sys.platform.startswith("win"):
+            from ctypes import windll
+            windll.shell32.SetCurrentProcessExplicitAppUserModelID("ffmpeg_gui.ffmpeg_gui.1.0")
+
         self.title("FFmpeg Studio")
         self.geometry("1200x750")
         self.minsize(900, 600)
@@ -1004,7 +1017,7 @@ class App(TkinterDnD.Tk):
         self.root_controller = Controller(self)
 
         # Set the application icon (requires .ico file on Windows)
-        icon_path = os.path.join(os.path.dirname(__file__), "app_icon.ico")
+        icon_path = os.path.join(get_application_path(), "app_icon.ico")
         if os.path.exists(icon_path):
             self.iconbitmap(icon_path)
         else:
