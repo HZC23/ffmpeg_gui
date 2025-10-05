@@ -656,27 +656,51 @@ class Controller:
 
     def handle_drop(self, event: "tk.Event") -> None:
         files = self.root.tk.splitlist(event.data)
-        for f in files:
-            self.add_file(f.strip('{').strip('}'))
+        valid_files = []
+        invalid_files = []
+
+        if self.operation_mode == "folders_to_videos":
+            for f in files:
+                path_str = f.strip('{').strip('}')
+                path_obj = Path(path_str)
+                if path_obj.is_dir():
+                    valid_files.append(path_str)
+                else:
+                    invalid_files.append(path_str)
+        else:
+            for f in files:
+                path_str = f.strip('{').strip('}')
+                path_obj = Path(path_str)
+                if path_obj.is_file():
+                    valid_files.append(path_str)
+                else:
+                    invalid_files.append(path_str)
+
+        for f in valid_files:
+            self.add_file(f)
+
+        if invalid_files:
+            error_message = f"{len(invalid_files)} invalid file(s) were ignored:\n"
+            if self.operation_mode == "folders_to_videos":
+                error_message += "Only folders can be added in 'Folders -> Videos' mode.\n\n"
+            else:
+                error_message += "Only files can be added in this mode.\n\n"
+            
+            # Show a few examples
+            for i, f in enumerate(invalid_files[:5]):
+                error_message += f"- {Path(f).name}\n"
+            if len(invalid_files) > 5:
+                error_message += f"... and {len(invalid_files) - 5} more."
+            
+            messagebox.showwarning("Invalid Files", error_message)
 
     def add_file(self, filepath: str) -> None:
-        path_obj = Path(filepath)
-        if self.operation_mode == "folders_to_videos":
-            if path_obj.is_dir() and filepath not in self.input_files:
-                self.input_files.append(filepath)
-                item = FileListItem(self.content_panel.file_scroll_frame, filepath, self.remove_file, is_folder=True)
-                item.pack(fill="x", padx=5, pady=2)
-                self.update_ui_state()
-            elif not path_obj.is_dir():
-                messagebox.showwarning("Attention", "Seuls les dossiers peuvent être ajoutés dans le mode 'Dossiers -> Vidéos'.")
-        else:
-            if path_obj.is_file() and filepath not in self.input_files:
-                self.input_files.append(filepath)
-                item = FileListItem(self.content_panel.file_scroll_frame, filepath, self.remove_file)
-                item.pack(fill="x", padx=5, pady=2)
-                self.update_ui_state()
-            elif not path_obj.is_file():
-                messagebox.showwarning("Attention", "Seuls les fichiers peuvent être ajoutés dans ce mode.")
+        if filepath not in self.input_files:
+            is_folder = Path(filepath).is_dir()
+            self.input_files.append(filepath)
+            item = FileListItem(self.content_panel.file_scroll_frame, filepath, self.remove_file, is_folder=is_folder)
+            item.pack(fill="x", padx=5, pady=2)
+            self.update_ui_state()
 
     def remove_file(self, filepath: str, widget: ctk.CTkFrame) -> None:
         if filepath in self.input_files:
