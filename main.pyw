@@ -744,40 +744,39 @@ class Controller:
         self.update_ui_state()
 
     def start_queue(self) -> None:
-        if self.is_processing or not self.job_queue_data: return
+        if self.is_processing or not self.job_queue_data:
+            return
         self.is_processing = True
+        self.total_jobs_in_queue = len(self.job_queue_data)
+        self.completed_jobs_count = 0
         self.update_ui_state()
         logger.info("--- Démarrage de la file d'attente ---")
-        job_queue = queue.Queue()
-        for job in self.job_queue_data: job_queue.put(job)
-        threading.Thread(target=self.process_queue, args=(job_queue,), daemon=True).start()
+        self.process_next_job()
 
-    def process_queue(self, job_queue: queue.Queue) -> None:
-        self.total_jobs_in_queue = len(self.job_queue_data) # Recalculate total jobs for this run
-        self.completed_jobs_count = 0
-        while not job_queue.empty():
-            job = job_queue.get()
-            self.current_job_total_duration = None # Reset for new job
-            self.last_reported_progress = 0.0 # Reset for new job
-            self.update_progress_ui(0)
-            try:
-                logger.info(f"\nTraitement: {job['description']}")
-                self.current_job_total_duration = self._get_job_total_duration(job)
-                command, output_file = self._build_ffmpeg_command(job)
-                if command:
-                    logger.info(f"Commande: {' '.join(command)}")
-                    start_ffmpeg_thread(command, on_finish=lambda success: self._on_ffmpeg_job_finished(job, success))
-                    # Wait for the current job to finish before processing the next one
-                    while self._current_proc is not None:
-                        time.sleep(0.1) # Small delay to avoid busy-waiting
-            except Exception as e:
-                logger.exception(f"Erreur majeure lors du traitement de la tâche: {job['description']}") # Use logger.exception
-                messagebox.showerror("Erreur", f"Une erreur majeure est survenue lors du traitement de la tâche: {job['description']}. Voir les logs pour plus de détails.")
-            job_queue.task_done()
-        self.is_processing = False
-        self.update_progress_ui(0) # Reset progress bar after queue finishes
-        self.clear_queue_ui() # Clear UI after entire queue finishes
-        logger.info("--- File d'attente terminée ---")
+    def process_next_job(self) -> None:
+        if not self.job_queue_data:
+            self.is_processing = False
+            self.root.after(0, self.update_ui_state)
+            self.root.after(0, self.clear_queue_ui)
+            logger.info("--- File d'attente terminée ---")
+            return
+
+        job = self.job_queue_data.pop(0)
+        self.current_job_total_duration = None  # Reset for new job
+        self.last_reported_progress = 0.0  # Reset for new job
+        self.root.after(0, self.update_progress_ui, 0)  # Reset progress bar for current job
+
+        try:
+            logger.info(f"\nTraitement: {job['description']}")
+            self.current_job_total_duration = self._get_job_total_duration(job)
+            command, output_file = self._build_ffmpeg_command(job)
+            if command:
+                logger.info(f"Commande: {' '.join(command)}")
+                start_ffmpeg_thread(command, on_finish=lambda success: self._on_ffmpeg_job_finished(job, success))
+        except Exception as e:
+            logger.exception(f"Erreur majeure lors du traitement de la tâche: {job['description']}")
+            messagebox.showerror("Erreur", f"Une erreur majeure est survenue lors du traitement de la tâche: {job['description']}. Voir les logs pour plus de détails.")
+            self.process_next_job()  # Process next job even if current one fails
 
     def clear_queue_ui(self) -> None:
         for widget in self.content_panel.queue_scroll_frame.winfo_children():
@@ -785,12 +784,14 @@ class Controller:
         self.job_queue_data.clear()
 
     def _on_ffmpeg_job_finished(self, job: dict, success: bool) -> None:
-        self.completed_jobs_count += 1 # Increment completed jobs
+        self.completed_jobs_count += 1
         if success:
             logger.info(f"SUCCÈS: {job['description']} terminé.")
+            self.root.after(0, self.update_progress_ui, 1.0)  # Mark job as 100% complete
         else:
             logger.error(f"ERREUR: {job['description']} a échoué.")
-        # The process_queue loop will handle moving to the next job
+
+        self.process_next_job()
 
     def _generate_ffmpeg_command_for_folder_images(self, folder_path: str, settings: dict) -> Tuple[List[str], str]:
         image_extensions = (".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".webp")
@@ -951,20 +952,11 @@ class Controller:
                     self._current_proc = payload
                 elif typ == "done":
                     self._current_proc = None
-                    self.on_ffmpeg_finished(payload)
         except queue.Empty:
             pass
         self.root.after(100, self.poll_ffmpeg_logs)  # relancer toutes les 100ms
 
-    def on_ffmpeg_finished(self, return_code: int) -> None:
-        self.is_processing = False
-        self.update_ui_state()
-        # Ensure the progress for the just-finished job is marked as 100% in the global context
-        self.update_progress_ui(1.0) 
-        if return_code == 0:
-            logger.info(f"--- Tâche FFmpeg terminée avec succès ({self.completed_jobs_count}/{self.total_jobs_in_queue}) ---")
-        else:
-            logger.error(f"--- FFmpeg terminé avec erreur (code: {return_code}) ({self.completed_jobs_count}/{self.total_jobs_in_queue}) ---")
+
 
     def cancel_ffmpeg(self) -> None:
         if hasattr(self, "_current_proc") and self._current_proc:
