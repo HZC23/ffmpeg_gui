@@ -1,2 +1,2 @@
 customtkinter
-tkinterdnd2-universal
+tkinterdnd2

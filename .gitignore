@@ -12,7 +12,12 @@ pip-wheel-metadata/
 
 # Logs
 ffmpeg_error.log
+app.log
 
 # OS generated files
 .DS_Store
 Thumbs.db
+
+# PyInstaller
+build/
+dist/
