@@ -6,7 +6,7 @@ a = Analysis(
     ['main.pyw'],
     pathex=[],
     binaries=[],
-    datas=[(os.path.join(os.path.dirname(tkinterdnd2.__file__), 'tkdnd'), 'tkdnd')],
+    datas=[(os.path.join(os.path.dirname(tkinterdnd2.__file__), 'tkdnd'), 'tkdnd'), ('app_icon.ico', '.')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},

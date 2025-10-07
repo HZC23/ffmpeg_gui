@@ -100,7 +100,8 @@ def get_available_encoders():
             check=False # Ne pas lever d'exception si ffmpeg retourne un code d'erreur
         )
         if result.returncode == 0:
-            logger.info("Encodeurs détectés avec succès.")
+            logger.debug("Encodeurs détectés avec succès.")
+            logger.debug(f"Sortie complète de ffmpeg -encoders:\n{result.stdout}")
             return result.stdout
         else:
             logger.error(f"ffmpeg -encoders a retourné le code d'erreur {result.returncode}: {result.stderr}")
