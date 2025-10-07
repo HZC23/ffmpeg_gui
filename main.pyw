@@ -246,9 +246,17 @@ def _generate_ffmpeg_command_and_output(mode: str, settings: dict, inputs: List[
             
             pix_fmt = "yuv420p"
             if settings['output_format'] == 'webm':
-                codec = 'libvpx-vp9'
-                pix_fmt = 'yuva420p'
-                codec_opts = {"-crf": str(settings['crf']), "-b:v": "0"}
+                encoders = get_available_encoders()
+                pix_fmt = 'yuv420p' 
+                if "vp9_nvenc" in encoders:
+                    logger.info("Encodeur sélectionné : vp9_nvenc (NVIDIA) pour WebM")
+                    codec = 'vp9_nvenc'
+                    codec_opts = {"-preset": "p6", "-rc": "vbr", "-cq": str(settings['crf']), "-b:v": "0"}
+                else:
+                    logger.info("Encodeur vp9_nvenc non trouvé, fallback sur libvpx-vp9 (CPU).")
+                    codec = 'libvpx-vp9'
+                    pix_fmt = 'yuva420p'
+                    codec_opts = {"-crf": str(settings['crf']), "-b:v": "0"}
             else:
                 is_hevc = settings['output_format'] in ['mkv', 'mp4']
                 codec, codec_opts = select_best_video_codec(settings['crf'], for_hevc=is_hevc)
@@ -874,9 +882,17 @@ class Controller:
 
         pix_fmt = "yuv420p"
         if settings['output_format'] == 'webm':
-            codec = 'libvpx-vp9'
-            pix_fmt = 'yuva420p'
-            codec_opts = {"-crf": str(settings['crf']), "-b:v": "0"}
+            encoders = get_available_encoders()
+            pix_fmt = 'yuv420p'
+            if "vp9_nvenc" in encoders:
+                logger.info("Encodeur sélectionné : vp9_nvenc (NVIDIA) pour WebM")
+                codec = 'vp9_nvenc'
+                codec_opts = {"-preset": "p6", "-rc": "vbr", "-cq": str(settings['crf']), "-b:v": "0"}
+            else:
+                logger.info("Encodeur vp9_nvenc non trouvé, fallback sur libvpx-vp9 (CPU).")
+                codec = 'libvpx-vp9'
+                pix_fmt = 'yuva420p'
+                codec_opts = {"-crf": str(settings['crf']), "-b:v": "0"}
         else:
             is_hevc = settings['output_format'] in ['mkv', 'mp4']
             codec, codec_opts = select_best_video_codec(settings['crf'], for_hevc=is_hevc)
