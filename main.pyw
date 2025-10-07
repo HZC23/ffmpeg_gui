@@ -17,9 +17,17 @@ import logging
 from logging.handlers import RotatingFileHandler
 from typing import List, Optional, Callable, Tuple
 import functools
+import hashlib
 
 LOG_FILE = Path.home() / ".ffmpeg_gui" / "app.log"
 LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+
+logger = logging.getLogger("ffmpeg_gui")
+logger.setLevel(logging.DEBUG)
+handler = RotatingFileHandler(str(LOG_FILE), maxBytes=5_000_000, backupCount=3, encoding="utf-8")
+formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+handler.setFormatter(formatter)
+logger.addHandler(handler)
 
 def get_application_path():
     if getattr(sys, 'frozen', False):
@@ -37,6 +45,39 @@ def get_executable_path(name):
 
 FFMPEG_PATH = get_executable_path("ffmpeg.exe")
 FFPROBE_PATH = get_executable_path("ffprobe.exe")
+
+def check_and_update_ffmpeg_hash(ffmpeg_path: str):
+    """Checks if ffmpeg executable has changed and notifies user."""
+    if not ffmpeg_path or not os.path.exists(ffmpeg_path):
+        return
+
+    hash_file = LOG_FILE.parent / "ffmpeg_hash.txt"
+    current_hash = ""
+    try:
+        with open(ffmpeg_path, "rb") as f:
+            current_hash = hashlib.sha256(f.read()).hexdigest()
+    except (IOError, PermissionError) as e:
+        logger.error(f"Impossible de lire le binaire ffmpeg pour le hachage: {e}")
+        return
+
+    stored_hash = ""
+    if hash_file.exists():
+        try:
+            stored_hash = hash_file.read_text(encoding="utf-8").strip()
+        except IOError as e:
+            logger.error(f"Impossible de lire le hachage ffmpeg stocké: {e}")
+
+    if current_hash and current_hash != stored_hash:
+        logger.info("Changement du binaire ffmpeg détecté.")
+        messagebox.showinfo(
+            "FFmpeg a changé",
+            "Le binaire FFmpeg a été modifié ou mis à jour.\n\n" 
+            "Il est recommandé de redémarrer l'application pour s'assurer que les nouvelles capacités (comme les encodeurs matériels) sont correctement détectées."
+        )
+        try:
+            hash_file.write_text(current_hash, encoding="utf-8")
+        except IOError as e:
+            logger.error(f"Impossible de sauvegarder le nouveau hachage ffmpeg: {e}")
 
 # =============================================================================
 # DÉTECTION D'ENCODEUR ET OPTIMISATION
@@ -114,14 +155,6 @@ def select_best_video_codec(quality_crf=23, for_hevc=False):
     logger.info("Encodeur H.264 matériel non trouvé, fallback sur libx264 (CPU).")
     return "libx264", {"-preset": "veryfast", "-crf": str(quality_crf), "-threads": "0"}
 
-
-logger = logging.getLogger("ffmpeg_gui")
-logger.setLevel(logging.DEBUG)
-handler = RotatingFileHandler(str(LOG_FILE), maxBytes=5_000_000, backupCount=3, encoding="utf-8")
-formatter = logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
-handler.setFormatter(formatter)
-logger.addHandler(handler)
-
 # --- Robust TkDND init (placer après les imports existants) ---
 DND_FILES = None
 TkinterDnD = None
@@ -195,13 +228,14 @@ def _generate_ffmpeg_command_and_output(mode: str, settings: dict, inputs: List[
             command.extend(["-i", input_file])
             if settings['trim_end']: command.extend(["-to", settings['trim_end']])
             
-            # --- Logique d'encodage optimisée ---
-            is_hevc = settings['output_format'] in ['mkv', 'mp4'] # Potentiellement utiliser HEVC pour mkv/mp4
+            is_hevc = settings['output_format'] in ['mkv', 'mp4']
             codec, codec_opts = select_best_video_codec(settings['crf'], for_hevc=is_hevc)
             command.extend(["-c:v", codec])
             for opt, val in codec_opts.items():
                 command.extend([opt, val])
-            # --- Fin de la logique ---
+            
+            if settings.get('framerate'):
+                command.extend(["-r", settings['framerate']])
 
             command.extend(["-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "192k", output_file, "-y"])
 
@@ -210,11 +244,10 @@ def _generate_ffmpeg_command_and_output(mode: str, settings: dict, inputs: List[
             if not seq_info: raise ValueError("Impossible de détecter une séquence d'images.")
             output_file = str(Path(input_file).parent / f"{seq_info['prefix']}_video.{settings['output_format']}")
             
-            # --- Logique d'encodage optimisée ---
             pix_fmt = "yuv420p"
             if settings['output_format'] == 'webm':
                 codec = 'libvpx-vp9'
-                pix_fmt = 'yuva420p' # Pour la transparence
+                pix_fmt = 'yuva420p'
                 codec_opts = {"-crf": str(settings['crf']), "-b:v": "0"}
             else:
                 is_hevc = settings['output_format'] in ['mkv', 'mp4']
@@ -224,7 +257,6 @@ def _generate_ffmpeg_command_and_output(mode: str, settings: dict, inputs: List[
             for opt, val in codec_opts.items():
                 command.extend([opt, val])
             command.extend(["-pix_fmt", pix_fmt, output_file, "-y"])
-            # --- Fin de la logique ---
 
         elif mode == "vid_seq":
             output_file = str(Path(input_file).parent / settings['output_pattern'])
@@ -399,25 +431,38 @@ class ConvertFrame(BaseTaskFrame):
         self.crf_value = tk.IntVar(value=23)
         self.trim_start = tk.StringVar()
         self.trim_end = tk.StringVar()
+        self.framerate = tk.StringVar()
 
         ctk.CTkLabel(self, text="Format de sortie:", font=AppTheme.FONT_BOLD).grid(row=0, column=0, padx=10, pady=10, sticky="w")
         ctk.CTkSegmentedButton(self, values=["mp4", "mkv", "mov", "gif"], variable=self.output_format, selected_color=AppTheme.COLOR_ACCENT, selected_hover_color=AppTheme.COLOR_ACCENT_HOVER).grid(row=0, column=1, padx=10, pady=10, sticky="w")
-        ctk.CTkLabel(self, text="Qualité (CRF):", font=AppTheme.FONT_BOLD).grid(row=1, column=0, padx=10, pady=10, sticky="w")
-        ctk.CTkSlider(self, from_=17, to=30, number_of_steps=13, variable=self.crf_value, button_color=AppTheme.COLOR_ACCENT, button_hover_color=AppTheme.COLOR_ACCENT_HOVER).grid(row=1, column=1, padx=10, pady=10, sticky="ew")
-        ctk.CTkLabel(self, textvariable=self.crf_value).grid(row=1, column=2, padx=10)
-        ctk.CTkLabel(self, text="Début (HH:MM:SS):", font=AppTheme.FONT_BOLD).grid(row=2, column=0, padx=10, pady=10, sticky="w")
-        ctk.CTkEntry(self, textvariable=self.trim_start).grid(row=2, column=1, padx=10, pady=10, sticky="ew")
-        ctk.CTkLabel(self, text="Fin (HH:MM:SS):", font=AppTheme.FONT_BOLD).grid(row=3, column=0, padx=10, pady=10, sticky="w")
-        ctk.CTkEntry(self, textvariable=self.trim_end).grid(row=3, column=1, padx=10, pady=10, sticky="ew")
+        
+        ctk.CTkLabel(self, text="Framerate (laisser vide pour auto):", font=AppTheme.FONT_BOLD).grid(row=1, column=0, padx=10, pady=10, sticky="w")
+        ctk.CTkEntry(self, textvariable=self.framerate).grid(row=1, column=1, padx=10, pady=10, sticky="w")
+
+        ctk.CTkLabel(self, text="Qualité (CRF):", font=AppTheme.FONT_BOLD).grid(row=2, column=0, padx=10, pady=10, sticky="w")
+        ctk.CTkSlider(self, from_=17, to=30, number_of_steps=13, variable=self.crf_value, button_color=AppTheme.COLOR_ACCENT, button_hover_color=AppTheme.COLOR_ACCENT_HOVER).grid(row=2, column=1, padx=10, pady=10, sticky="ew")
+        ctk.CTkLabel(self, textvariable=self.crf_value).grid(row=2, column=2, padx=10)
+        
+        ctk.CTkLabel(self, text="Début (HH:MM:SS):", font=AppTheme.FONT_BOLD).grid(row=3, column=0, padx=10, pady=10, sticky="w")
+        ctk.CTkEntry(self, textvariable=self.trim_start).grid(row=3, column=1, padx=10, pady=10, sticky="ew")
+        
+        ctk.CTkLabel(self, text="Fin (HH:MM:SS):", font=AppTheme.FONT_BOLD).grid(row=4, column=0, padx=10, pady=10, sticky="w")
+        ctk.CTkEntry(self, textvariable=self.trim_end).grid(row=4, column=1, padx=10, pady=10, sticky="ew")
 
     def get_settings(self):
-        return {"output_format": self.output_format.get(), "crf": self.crf_value.get(), "trim_start": self.trim_start.get(), "trim_end": self.trim_end.get()}
+        return {
+            "output_format": self.output_format.get(), 
+            "crf": self.crf_value.get(), 
+            "trim_start": self.trim_start.get(), 
+            "trim_end": self.trim_end.get(),
+            "framerate": self.framerate.get()
+        }
 
 class ImageSequenceFrame(BaseTaskFrame):
     def __init__(self, master, **kwargs):
         super().__init__(master, **kwargs)
         self.output_format = tk.StringVar(value="mp4")
-        self.framerate = tk.StringVar(value="25")
+        self.framerate = tk.StringVar(value="30")
         self.crf_value = tk.IntVar(value=22)
 
         ctk.CTkLabel(self, text="Format de sortie:", font=AppTheme.FONT_BOLD).grid(row=0, column=0, padx=10, pady=10, sticky="w")
@@ -553,15 +598,12 @@ class ContentPanel(ctk.CTkFrame):
         self.file_panel.grid(row=0, column=0, sticky="ew", padx=(10, 0), pady=(10, 5))
         self.file_panel.grid_columnconfigure(0, weight=1)
         ctk.CTkLabel(self.file_panel, text="Fichiers d'Entrée (Glissez-déposez ici)", font=AppTheme.FONT_BOLD).grid(row=0, column=0, padx=10, pady=10, sticky="w")
-        # Création d'un container tk natif pour DnD (plus fiable que d'enregistrer sur un widget CTk)
         self._dnd_target = tk.Frame(self.file_panel, bg=AppTheme.COLOR_BACKGROUND)
         self._dnd_target.grid(row=1, column=0, sticky="nsew", padx=10, pady=5)
 
-        # Le scrollable CTk est placé DANS ce container (apparence inchangée pour l'utilisateur)
         self.file_scroll_frame = ctk.CTkScrollableFrame(self._dnd_target, height=120, fg_color=AppTheme.COLOR_BACKGROUND, border_color=AppTheme.COLOR_FRAME_BORDER, border_width=1)
         self.file_scroll_frame.pack(fill="both", expand=True)
 
-        # Enregistrement du DnD sur le widget tk natif (si disponible)
         if DND_FILES:
             try:
                 self._dnd_target.drop_target_register(DND_FILES)
@@ -569,7 +611,6 @@ class ContentPanel(ctk.CTkFrame):
                 self._dnd_target.dnd_bind('<<DragEnter>>', self.on_drag_enter)
                 self._dnd_target.dnd_bind('<<DragLeave>>', self.on_drag_leave)
             except Exception:
-                # dernier recours : tenter sur la CTkScrollableFrame si elle supporte l'API
                 if hasattr(self.file_scroll_frame, "drop_target_register"):
                     self.file_scroll_frame.drop_target_register(DND_FILES)
                     self.file_scroll_frame.dnd_bind('<<Drop>>', self.controller.handle_drop)
@@ -653,11 +694,12 @@ class Controller:
         self.input_files = []
         self.job_queue_data = []
         self.is_processing = False
-        self._current_proc = None # Added for ffmpeg process tracking
-        self.current_job_total_duration = None # For progress tracking
-        self.last_reported_progress = 0.0 # For smoothing progress updates
+        self._current_proc = None
+        self.current_job_total_duration = None
+        self.last_reported_progress = 0.0
         self.total_jobs_in_queue = 0
         self.completed_jobs_count = 0
+        self.last_detected_framerate = "30"  # Valeur par défaut
 
         self.sidebar = Sidebar(self.root, self, width=220)
         self.sidebar.grid(row=0, column=0, sticky="nsew")
@@ -667,52 +709,41 @@ class Controller:
         self.root.grid_columnconfigure(1, weight=1)
         self.sidebar.select_task("convert")
         self.update_ui_state()
-        self.root.after(100, self.poll_ffmpeg_logs) # Start polling for ffmpeg logs
+        self.root.after(100, self.poll_ffmpeg_logs)
 
     def set_operation_mode(self, mode):
         self.operation_mode = mode
         self.content_panel.show_task_frame(mode)
+        
+        # Mettre à jour le framerate pour les modes basés sur les images
+        if mode in ["img_seq", "folders_to_videos"]:
+            target_frame = self.content_panel.task_frames.get(mode)
+            if target_frame:
+                target_frame.framerate.set(self.last_detected_framerate)
+
         self.update_ui_state()
 
     def handle_drop(self, event: "tk.Event") -> None:
         files = self.root.tk.splitlist(event.data)
-        valid_files = []
-        invalid_files = []
+        valid_files, invalid_files = [], []
 
-        if self.operation_mode == "folders_to_videos":
-            for f in files:
-                path_str = f.strip('{').strip('}')
-                path_obj = Path(path_str)
-                if path_obj.is_dir():
-                    valid_files.append(path_str)
-                else:
-                    invalid_files.append(path_str)
-        else:
-            for f in files:
-                path_str = f.strip('{').strip('}')
-                path_obj = Path(path_str)
-                if path_obj.is_file():
-                    valid_files.append(path_str)
-                else:
-                    invalid_files.append(path_str)
+        for f in files:
+            path_str = f.strip('{}')
+            path_obj = Path(path_str)
+            is_dir = path_obj.is_dir()
+            
+            if self.operation_mode == "folders_to_videos":
+                if is_dir: valid_files.append(path_str)
+                else: invalid_files.append(path_str)
+            else:
+                if not is_dir: valid_files.append(path_str)
+                else: invalid_files.append(path_str)
 
-        for f in valid_files:
-            self.add_file(f)
+        for f in valid_files: self.add_file(f)
 
         if invalid_files:
-            error_message = f"{len(invalid_files)} invalid file(s) were ignored:\n"
-            if self.operation_mode == "folders_to_videos":
-                error_message += "Only folders can be added in 'Folders -> Videos' mode.\n\n"
-            else:
-                error_message += "Only files can be added in this mode.\n\n"
-            
-            # Show a few examples
-            for i, f in enumerate(invalid_files[:5]):
-                error_message += f"- {Path(f).name}\n"
-            if len(invalid_files) > 5:
-                error_message += f"... and {len(invalid_files) - 5} more."
-            
-            messagebox.showwarning("Invalid Files", error_message)
+            mode_text = "dossiers" if self.operation_mode == "folders_to_videos" else "fichiers"
+            messagebox.showwarning("Fichiers Invalides", f"Seuls les {mode_text} sont autorisés dans ce mode. {len(invalid_files)} élément(s) ignoré(s).")
 
     def add_file(self, filepath: str) -> None:
         if filepath not in self.input_files:
@@ -720,6 +751,17 @@ class Controller:
             self.input_files.append(filepath)
             item = FileListItem(self.content_panel.file_scroll_frame, filepath, self.remove_file, is_folder=is_folder)
             item.pack(fill="x", padx=5, pady=2)
+
+            if not is_folder:
+                framerate = self._get_video_framerate(filepath)
+                if framerate:
+                    self.last_detected_framerate = framerate
+                    # Mettre à jour le champ si on est déjà dans le bon mode
+                    if self.operation_mode == "convert":
+                        self.content_panel.task_frames["convert"].framerate.set(framerate)
+                    elif self.operation_mode in ["img_seq", "folders_to_videos"]:
+                        self.content_panel.task_frames[self.operation_mode].framerate.set(framerate)
+
             self.update_ui_state()
 
     def remove_file(self, filepath: str, widget: ctk.CTkFrame) -> None:
@@ -743,7 +785,7 @@ class Controller:
                 item = QueueListItem(self.content_panel.queue_scroll_frame, job_data, self.remove_from_queue)
                 item.pack(fill="x", padx=5, pady=2)
                 logger.info(f"Ajouté: {description}")
-                self.total_jobs_in_queue += 1 # Increment for each job
+                self.total_jobs_in_queue += 1
         else:
             if not self.input_files:
                 messagebox.showwarning("Attention", "Veuillez ajouter au moins un fichier.")
@@ -754,7 +796,7 @@ class Controller:
             item = QueueListItem(self.content_panel.queue_scroll_frame, job_data, self.remove_from_queue)
             item.pack(fill="x", padx=5, pady=2)
             logger.info(f"Ajouté: {description}")
-            self.total_jobs_in_queue += 1 # Increment for the single job
+            self.total_jobs_in_queue += 1
         self.update_ui_state()
 
     def remove_from_queue(self, job_data: dict, widget: ctk.CTkFrame) -> None:
@@ -782,9 +824,9 @@ class Controller:
             return
 
         job = self.job_queue_data.pop(0)
-        self.current_job_total_duration = None  # Reset for new job
-        self.last_reported_progress = 0.0  # Reset for new job
-        self.root.after(0, self.update_progress_ui, 0)  # Reset progress bar for current job
+        self.current_job_total_duration = None
+        self.last_reported_progress = 0.0
+        self.root.after(0, self.update_progress_ui, 0)
 
         try:
             logger.info(f"\nTraitement: {job['description']}")
@@ -795,8 +837,8 @@ class Controller:
                 start_ffmpeg_thread(command, on_finish=lambda success: self._on_ffmpeg_job_finished(job, success))
         except Exception as e:
             logger.exception(f"Erreur majeure lors du traitement de la tâche: {job['description']}")
-            messagebox.showerror("Erreur", f"Une erreur majeure est survenue lors du traitement de la tâche: {job['description']}. Voir les logs pour plus de détails.")
-            self.process_next_job()  # Process next job even if current one fails
+            messagebox.showerror("Erreur", f"Une erreur majeure est survenue lors du traitement de la tâche: {job['description']}. Voir les logs.")
+            self.process_next_job()
 
     def clear_queue_ui(self) -> None:
         for widget in self.content_panel.queue_scroll_frame.winfo_children():
@@ -807,10 +849,9 @@ class Controller:
         self.completed_jobs_count += 1
         if success:
             logger.info(f"SUCCÈS: {job['description']} terminé.")
-            self.root.after(0, self.update_progress_ui, 1.0)  # Mark job as 100% complete
+            self.root.after(0, self.update_progress_ui, 1.0)
         else:
             logger.error(f"ERREUR: {job['description']} a échoué.")
-
         self.process_next_job()
 
     def _generate_ffmpeg_command_for_folder_images(self, folder_path: str, settings: dict) -> Tuple[List[str], str]:
@@ -820,7 +861,6 @@ class Controller:
         if not images:
             raise ValueError(f"Aucune image trouvée dans le dossier: {folder_path}")
 
-        # Créer un fichier de liste temporaire pour le démultiplexeur concat de ffmpeg
         list_file_path = Path(tempfile.gettempdir()) / f"ffmpeg_imagelist_{os.getpid()}_{Path(folder_path).name}.txt"
         frame_duration = 1 / float(settings.get('framerate', 25))
         with open(list_file_path, "w", encoding="utf-8") as f:
@@ -832,7 +872,6 @@ class Controller:
         base_name = Path(folder_path).name
         output_file = str(Path(folder_path) / f"{base_name}_video.{settings['output_format']}")
 
-        # --- Logique d'encodage optimisée ---
         pix_fmt = "yuv420p"
         if settings['output_format'] == 'webm':
             codec = 'libvpx-vp9'
@@ -842,36 +881,39 @@ class Controller:
             is_hevc = settings['output_format'] in ['mkv', 'mp4']
             codec, codec_opts = select_best_video_codec(settings['crf'], for_hevc=is_hevc)
 
-        command = [
-            FFMPEG_PATH,
-            "-f", "concat",
-            "-safe", "0",
-            "-i", str(list_file_path),
-            "-c:v", codec,
-        ]
-        for opt, val in codec_opts.items():
-            command.extend([opt, val])
-        command.extend([
-            "-pix_fmt", pix_fmt,
-            "-framerate", settings['framerate'], # Placé ici pour certains codecs
-            output_file,
-            "-y"
-        ])
-        # --- Fin de la logique ---
-        
+        command = [FFMPEG_PATH, "-f", "concat", "-safe", "0", "-i", str(list_file_path), "-c:v", codec]
+        for opt, val in codec_opts.items(): command.extend([opt, val])
+        command.extend(["-pix_fmt", pix_fmt, "-framerate", settings['framerate'], output_file, "-y"])
         return command, output_file
 
     def _get_video_duration(self, filepath: str) -> Optional[float]:
-        if not FFPROBE_PATH:
-            return None
+        if not FFPROBE_PATH: return None
         try:
             cmd = [FFPROBE_PATH, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", filepath]
             result = subprocess.run(cmd, capture_output=True, text=True, check=True, encoding="utf-8", errors="replace")
-            duration = float(result.stdout.strip())
-            return duration
+            return float(result.stdout.strip())
         except (subprocess.CalledProcessError, ValueError, FileNotFoundError) as e:
-            logger.error(f"Could not get duration for {filepath} using ffprobe: {e}")
+            logger.error(f"Could not get duration for {filepath}: {e}")
             return None
+
+    def _get_video_framerate(self, filepath: str) -> Optional[str]:
+        if not FFPROBE_PATH: return None
+        try:
+            cmd = [FFPROBE_PATH, "-v", "error", "-select_streams", "v:0", "-show_entries", "stream=r_frame_rate", "-of", "default=noprint_wrappers=1:nokey=1", filepath]
+            result = subprocess.run(cmd, capture_output=True, text=True, check=True, encoding="utf-8", errors="replace")
+            framerate_str = result.stdout.strip()
+            if '/' in framerate_str:
+                num, den = map(int, framerate_str.split('/'))
+                if den == 0: return "25"
+                val = num / den
+                return str(int(val)) if val == int(val) else f"{val:.3f}".rstrip('0').rstrip('.')
+            elif framerate_str:
+                val = float(framerate_str)
+                return str(int(val)) if val == int(val) else f"{val:.3f}".rstrip('0').rstrip('.')
+            return "25"
+        except (subprocess.CalledProcessError, ValueError, FileNotFoundError) as e:
+            logger.error(f"Could not get framerate for {filepath}: {e}")
+            return "25"
 
     def _get_job_total_duration(self, job: dict) -> Optional[float]:
         mode, settings, inputs = job['mode'], job['settings'], job['input_files']
@@ -880,22 +922,16 @@ class Controller:
         if mode in ["convert", "extract_audio", "extract_image", "merge", "subtitles", "speed"]:
             return self._get_video_duration(inputs[0])
         elif mode in ["img_seq", "folders_to_videos"]:
-            # For image sequences, estimate duration based on number of images and framerate
-            framerate = float(settings.get('framerate', 25)) # Default to 25 if not set
+            framerate = float(settings.get('framerate', 25))
             if framerate == 0: return None
-
             image_count = 0
             if mode == "img_seq":
-                # For img_seq, inputs is a list of image files
                 image_count = len(inputs)
             elif mode == "folders_to_videos":
-                # For folders_to_videos, inputs[0] is a folder path
                 folder_path = inputs[0]
                 image_extensions = (".png", ".jpg", ".jpeg", ".bmp", ".tiff", ".webp")
                 image_count = len([f for f in Path(folder_path).iterdir() if f.is_file() and f.suffix.lower() in image_extensions])
-
-            if image_count > 0:
-                return image_count / framerate
+            return image_count / framerate if image_count > 0 else None
         return None
 
     def _build_ffmpeg_command(self, job: dict) -> Tuple[List[str], str]:
@@ -919,10 +955,6 @@ class Controller:
         ffmpeg_pattern = f"{prefix}%0{padding}d{ext}"
         return {"pattern": str(Path(files[0]).parent / ffmpeg_pattern), "start": start_number, "prefix": prefix}
 
-
-
-
-
     def update_ui_state(self):
         has_files = bool(self.input_files)
         has_queue = bool(self.job_queue_data)
@@ -933,31 +965,19 @@ class Controller:
         self.content_panel.add_button.configure(state=add_btn_state)
         self.content_panel.start_button.configure(state=start_btn_state)
         self.content_panel.cancel_button.configure(state=cancel_btn_state)
-
-        if self.is_processing:
-            self.content_panel.start_button.configure(text="Traitement en cours...")
-        else:
-            self.content_panel.start_button.configure(text="Démarrer la File")
+        self.content_panel.start_button.configure(text="Traitement en cours..." if self.is_processing else "Démarrer la File")
 
     def update_progress_ui(self, current_job_progress: float, text: str = ""):
-        if self.total_jobs_in_queue > 0:
-            global_progress = (self.completed_jobs_count + current_job_progress) / self.total_jobs_in_queue
-        else:
-            global_progress = 0.0
-
+        global_progress = (self.completed_jobs_count + current_job_progress) / self.total_jobs_in_queue if self.total_jobs_in_queue > 0 else 0.0
         self.content_panel.progress_bar.set(global_progress)
-        if text:
-            self.content_panel.progress_label.configure(text=text)
-        else:
-            self.content_panel.progress_label.configure(text=f"{int(global_progress * 100)}% (Tâche {self.completed_jobs_count + 1}/{self.total_jobs_in_queue})")
+        self.content_panel.progress_label.configure(text=text or f"{int(global_progress * 100)}% (Tâche {self.completed_jobs_count + 1}/{self.total_jobs_in_queue})")
 
     def poll_ffmpeg_logs(self) -> None:
         try:
             while True:
                 typ, payload = _ffmpeg_log_queue.get_nowait()
                 if typ == "line":
-                    self.content_panel.append_log(payload)  # méthode qui affiche dans la zone log
-                    # Parse FFmpeg progress
+                    self.content_panel.append_log(payload)
                     if self.current_job_total_duration:
                         time_match = re.search(r'time=(\d{2}):(\d{2}):(\d{2}\.\d{2})', payload)
                         if time_match:
@@ -969,16 +989,12 @@ class Controller:
                                 self.last_reported_progress = progress
                 elif typ == "error":
                     self.content_panel.append_log(payload, "error")
-                    logger.error(payload) # Log to file as well
-                elif typ == "proc":
-                    self._current_proc = payload
-                elif typ == "done":
-                    self._current_proc = None
+                    logger.error(payload)
+                elif typ == "proc": self._current_proc = payload
+                elif typ == "done": self._current_proc = None
         except queue.Empty:
             pass
-        self.root.after(100, self.poll_ffmpeg_logs)  # relancer toutes les 100ms
-
-
+        self.root.after(100, self.poll_ffmpeg_logs)
 
     def cancel_ffmpeg(self) -> None:
         if hasattr(self, "_current_proc") and self._current_proc:
@@ -986,8 +1002,7 @@ class Controller:
                 self._current_proc.terminate()
                 logger.info("Opération FFmpeg annulée.")
             except Exception as e:
-                logger.exception(f"Erreur lors de l'annulation de l'opération FFmpeg: {e}")
-                messagebox.showerror("Erreur d'annulation", f"Une erreur est survenue lors de l'annulation de l'opération FFmpeg. Voir les logs pour plus de détails.")
+                logger.exception(f"Erreur lors de l'annulation: {e}")
             finally:
                 self._current_proc = None
                 self.is_processing = False
@@ -996,12 +1011,6 @@ class Controller:
 # =============================================================================
 # APPLICATION ROOT
 # =============================================================================
-def get_application_path():
-    if getattr(sys, 'frozen', False):
-        return os.path.dirname(sys.executable)
-    else:
-        return os.path.dirname(__file__)
-
 class App(TkinterDnD.Tk):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -1010,23 +1019,26 @@ class App(TkinterDnD.Tk):
             from ctypes import windll
             windll.shell32.SetCurrentProcessExplicitAppUserModelID("ffmpeg_gui.ffmpeg_gui.1.0")
 
+        if FFMPEG_PATH:
+            check_and_update_ffmpeg_hash(FFMPEG_PATH)
+        else:
+            messagebox.showerror("Erreur Critique", "ffmpeg.exe est introuvable. L'application ne peut pas fonctionner.")
+            logger.error("CRITICAL: ffmpeg.exe not found on PATH or in app directory.")
+            self.after(100, self.destroy)
+            return
+
         self.title("FFmpeg Studio")
         self.geometry("1200x750")
         self.minsize(900, 600)
         self.configure(background=AppTheme.COLOR_BACKGROUND)
         self.root_controller = Controller(self)
 
-        # Set the application icon (requires .ico file on Windows)
         icon_path = os.path.join(get_application_path(), "app_icon.ico")
         if os.path.exists(icon_path):
             self.iconbitmap(icon_path)
+            logger.info(f"Icône chargée depuis {icon_path}")
         else:
-            logger.warning(f"Icon file not found at {icon_path}. Please provide an app_icon.ico file.")
-
-        if not FFMPEG_PATH:
-            messagebox.showerror("Erreur", "ffmpeg n'est pas installé ou n'est pas dans le PATH.")
-            logger.error("ffmpeg non trouvé ou non accessible dans le PATH.")
-            self.destroy() # Close the application if ffmpeg is not found
+            logger.warning(f"Icon file not found at {icon_path}.")
 
 if __name__ == "__main__":
     ctk.set_appearance_mode("Dark")
